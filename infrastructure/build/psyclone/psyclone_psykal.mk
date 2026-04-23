@@ -16,78 +16,46 @@ DSL = psykal
 PSYCLONE_PSYKAL_EXTRAS ?= -l all
 #
 
-ALGORITHM_F_FILES := $(patsubst $(SOURCE_DIR)/%.X90, \
-                                $(WORKING_DIR)/%.f90, \
-                                $(shell find $(SOURCE_DIR) -name '*.X90' -print))
-
-ALGORITHM_f_FILES := $(patsubst $(SOURCE_DIR)/%.x90, \
-                                $(WORKING_DIR)/%.f90, \
-                                $(shell find $(SOURCE_DIR) -name '*.x90' -print))
+PREPROCESSED_X90_FILES := $(patsubst $(SOURCE_DIR)/%.X90, \
+                                     $(WORKING_DIR)/%.x90, \
+                                     $(shell find $(SOURCE_DIR) -name '*.X90' -print)) \
+                          $(patsubst $(SOURCE_DIR)/%.x90, \
+                                     $(WORKING_DIR)/%.x90, \
+                                     $(shell find $(SOURCE_DIR) -name '*.x90' -print))
 
 DIRECTORIES := $(patsubst $(SOURCE_DIR)%,$(WORKING_DIR)%, \
                           $(shell find $(SOURCE_DIR) -type d -printf '%p/\n'))
 PSYCLONE_CONFIG_FILE ?= $(CORE_ROOT_DIR)/etc/psyclone.cfg
 
+BATCH_PSYCLONE := $(LFRIC_BUILD)/psyclone/batch_psyclone.py
+
 .PHONY: psyclone
-psyclone: $(ALGORITHM_F_FILES) $(ALGORITHM_f_FILES)
+psyclone: $(DIRECTORIES) $(PREPROCESSED_X90_FILES)
+	$(call MESSAGE,PSyclone - batch processing all files)
+	$QPYTHONPATH=$(LFRIC_BUILD)/psyclone:$$PYTHONPATH python $(BATCH_PSYCLONE) \
+	           -d $(WORKING_DIR) \
+	           --config $(PSYCLONE_CONFIG_FILE) \
+	           $(if $(OPTIMISATION_PATH),--optimisation-path $(OPTIMISATION_PATH) --dsl $(DSL)) \
+	           $(addprefix --file ,$(PREPROCESSED_X90_FILES)) \
+	           $(PSYCLONE_PSYKAL_EXTRAS)
 
 include $(LFRIC_BUILD)/lfric.mk
 include $(LFRIC_BUILD)/fortran.mk
 
 MACRO_ARGS := $(addprefix -D,$(PRE_PROCESS_MACROS))
 
-# Where an override file exists in the "psy" directory we invoke PSyclone, then
-# delete the resulting PSy source. The override has been copied as part of the
-# rest of the source.
+# Where an override file exists in the "psy" directory, delete the PSyclone-
+# generated PSy source in favour of the manually provided one.
 #
-$(WORKING_DIR)/%.f90: \
-$$(SOURCE_DIR)/psy/$$(notdir $$*)_psy.f90 $(WORKING_DIR)/%_psy.f90
-	$(call MESSAGE,Removing,$*_psy.f90)
-	$Qrm $(WORKING_DIR)/$*_psy.f90
-
-# Where an optimisation script exists for a specific file, use it.
-#
-$(WORKING_DIR)/%.f90 $(WORKING_DIR)/%_psy.f90: \
-$(WORKING_DIR)/%.x90 $$(OPTIMISATION_PATH)/$(DSL)/$$*.py | $$(dir $$@)
-	$(call MESSAGE,PSyclone - local optimisation,$(subst $(SOURCE_DIR)/,,$<))
-	$QPYTHONPATH=$(LFRIC_BUILD)/psyclone:$$PYTHONPATH psyclone -api lfric \
-	           -d $(WORKING_DIR) \
-	           --config $(PSYCLONE_CONFIG_FILE) \
-	           -s $(OPTIMISATION_PATH)/$(DSL)/$*.py \
-	           -okern $(WORKING_DIR)/kernel \
-	           -oalg $(WORKING_DIR)/$*.f90 \
-	           -opsy $(WORKING_DIR)/$*_psy.f90 \
-	           $(PSYCLONE_PSYKAL_EXTRAS) \
-	           $<
-
-# Where a global optimisation script exists, use it.
-#
-$(WORKING_DIR)/%.f90 $(WORKING_DIR)/%_psy.f90: \
-$(WORKING_DIR)/%.x90 $(OPTIMISATION_PATH)/$(DSL)/global.py | $$(dir $$@)
-	$(call MESSAGE,PSyclone - global optimisation,$(subst $(SOURCE_DIR)/,,$<))
-	$QPYTHONPATH=$(LFRIC_BUILD)/psyclone:$$PYTHONPATH psyclone -api lfric \
-	           -d $(WORKING_DIR) \
-	           --config $(PSYCLONE_CONFIG_FILE) \
-	           -s $(OPTIMISATION_PATH)/$(DSL)/global.py \
-	           -okern $(WORKING_DIR)/kernel \
-	           -oalg  $(WORKING_DIR)/$*.f90 \
-	           -opsy $(WORKING_DIR)/$*_psy.f90 \
-	           $(PSYCLONE_PSYKAL_EXTRAS) \
-	           $<
-
-# Where no optimisation script exists, don't use it.
-#
-$(WORKING_DIR)/%.f90 $(WORKING_DIR)/%_psy.f90: \
-$(WORKING_DIR)/%.x90 | $$(dir $$@)
-	$(call MESSAGE,PSyclone,$(subst $(SOURCE_DIR)/,,$<))
-	$QPYTHONPATH=$(LFRIC_BUILD)/psyclone:$$PYTHONPATH psyclone -api lfric \
-	           -l all -d $(WORKING_DIR) \
-	           --config $(PSYCLONE_CONFIG_FILE) \
-	           -okern $(WORKING_DIR)/kernel \
-	           -oalg  $(WORKING_DIR)/$*.f90 \
-	           -opsy $(WORKING_DIR)/$*_psy.f90 \
-	           $(PSYCLONE_PSYKAL_EXTRAS) \
-	           $<
+PSY_OVERRIDE_FILES := $(shell find $(SOURCE_DIR)/psy -name '*_psy.f90' 2>/dev/null)
+ifneq ($(PSY_OVERRIDE_FILES),)
+.PHONY: psyclone_psy_overrides
+psyclone_psy_overrides: psyclone
+	$(foreach f,$(PSY_OVERRIDE_FILES), \
+	  $(eval _stem=$(patsubst $(SOURCE_DIR)/psy/%_psy.f90,%,$(f))) \
+	  $(call MESSAGE,Removing,$(_stem)_psy.f90) \
+	  $Qrm -f $(WORKING_DIR)/$(_stem)_psy.f90 ;)
+endif
 
 .PRECIOUS: $(WORKING_DIR)/%.x90
 # Perform preprocessing for big X90 files.
