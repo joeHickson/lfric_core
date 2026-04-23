@@ -1,7 +1,7 @@
 # Contributors
 
 | GitHub user      | Real Name              | Affiliation | Date       |
-| ---------------- | ---------------------- | ----------- | ---------- |
+|------------------| ---------------------- | ----------- | ---------- |
 | andrewcoughtrie  | Andrew Coughtrie       | Met Office  | 2025.12.12 |
 | james-bruten-mo  | James Bruten           | Met Office  | 2025-12-09 |
 | jedbakerMO       | Jed Baker              | Met Office  | 2025-12-29 |
@@ -23,3 +23,4 @@
 | jcsmeto          | James Cunningham-Smith | Met Office  | 2026-02-06 |
 | thomasmelvin     | Thomas Melvin          | Met Office  | 2026-01-15 |
 | ericaneininger   | Erica Neininger        | Met Office  | 2026-03-02 |
+| joehickson       | Joe Hickson            | Met Office  | 2026-04-23 |
