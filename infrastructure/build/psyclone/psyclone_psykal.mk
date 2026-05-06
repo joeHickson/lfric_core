@@ -26,6 +26,7 @@ PREPROCESSED_X90_FILES := $(patsubst $(SOURCE_DIR)/%.X90, \
 DIRECTORIES := $(patsubst $(SOURCE_DIR)%,$(WORKING_DIR)%, \
                           $(shell find $(SOURCE_DIR) -type d -printf '%p/\n'))
 PSYCLONE_CONFIG_FILE ?= $(CORE_ROOT_DIR)/etc/psyclone.cfg
+MAKE_THREADS ?= 1
 
 BATCH_PSYCLONE := $(LFRIC_BUILD)/psyclone/batch_psyclone.py
 
@@ -35,6 +36,7 @@ psyclone: $(DIRECTORIES) $(PREPROCESSED_X90_FILES)
 	$QPYTHONPATH=$(LFRIC_BUILD)/psyclone:$$PYTHONPATH python $(BATCH_PSYCLONE) \
 	           -d $(WORKING_DIR) \
 	           --config $(PSYCLONE_CONFIG_FILE) \
+	           -j $(MAKE_THREADS) \
 	           $(if $(OPTIMISATION_PATH),--optimisation-path $(OPTIMISATION_PATH) --dsl $(DSL)) \
 	           $(addprefix --file ,$(PREPROCESSED_X90_FILES)) \
 	           $(PSYCLONE_PSYKAL_EXTRAS)

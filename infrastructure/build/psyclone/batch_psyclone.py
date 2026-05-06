@@ -13,13 +13,82 @@ script (per-file, global, or none) automatically.
 
 PSyclone is loaded as a Python module and called directly to avoid
 paying the cost of starting a new Python interpreter for every file.
+The import is performed once per worker process at pool initialisation.
 """
 
 import argparse
 import os
 import sys
+import time
 
-from psyclone.generator import main as psyclone_main
+# Module-level reference populated by worker initializer
+_psyclone_main = None
+
+
+def _worker_init():
+    """Initializer for each worker process — imports PSyclone once."""
+    global _psyclone_main
+    import logging
+    import warnings
+    logging.getLogger('psyclone').setLevel(logging.WARNING)
+    warnings.filterwarnings('ignore', module='psyclone')
+    from psyclone.generator import main as psyclone_main
+    _psyclone_main = psyclone_main
+
+
+def _resolve_opt_script(optimisation_path, dsl, stem):
+    """Return (opt_script, label) for a given file stem."""
+    if optimisation_path:
+        local_script = os.path.join(optimisation_path, dsl, f"{stem}.py")
+        global_script = os.path.join(optimisation_path, dsl, "global.py")
+        if os.path.isfile(local_script):
+            return local_script, "PSyclone - local optimisation"
+        elif os.path.isfile(global_script):
+            return global_script, "PSyclone - global optimisation"
+    return None, "PSyclone"
+
+
+def _process_one(args_tuple):
+    """Process a single x90 file. Runs in a worker process."""
+    x90_file, working_dir, config, optimisation_path, dsl, extras = args_tuple
+
+    import io
+
+    stem = os.path.relpath(x90_file, working_dir)
+    stem = os.path.splitext(stem)[0]
+
+    opt_script, label = _resolve_opt_script(optimisation_path, dsl, stem)
+
+    psyclone_args = [
+        '-api', 'lfric',
+        '-d', working_dir,
+        '--config', config,
+        '-okern', os.path.join(working_dir, 'kernel'),
+        '-oalg', os.path.join(working_dir, f'{stem}.f90'),
+        '-opsy', os.path.join(working_dir, f'{stem}_psy.f90'),
+    ]
+    if opt_script:
+        psyclone_args.extend(['-s', opt_script])
+    psyclone_args.extend(extras)
+    psyclone_args.append(x90_file)
+
+    timestamp = time.strftime('%H:%M:%S')
+    try:
+        saved_stdout = sys.stdout
+        saved_stderr = sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        try:
+            _psyclone_main(psyclone_args)
+        finally:
+            sys.stdout = saved_stdout
+            sys.stderr = saved_stderr
+        return (0, f"{timestamp} *{label}* {stem}")
+    except SystemExit as err:
+        rc = err.code if err.code and err.code != 0 else 0
+        return (rc, f"{timestamp} *{label}* {stem}")
+    except Exception as err:
+        return (1, f"{timestamp} *{label}* {stem} ERROR: {err}")
 
 
 def main():
@@ -36,57 +105,36 @@ def main():
     parser.add_argument('--file', dest='files', action='append',
                         default=[],
                         help="x90 file to process (repeat for each file)")
+    parser.add_argument('-j', '--jobs', type=int, default=None,
+                        help="Number of parallel workers (default: MAKE_THREADS or cpu_count)")
     args, extras = parser.parse_known_args()
 
     if not args.files:
         return
 
+    n_workers = args.jobs or int(os.environ.get('MAKE_THREADS', '0') or '0') or os.cpu_count() or 1
+
+    from concurrent.futures import ProcessPoolExecutor
+
+    # Sort files by size descending for better load balancing —
+    # large files are dispatched first so workers stay busy at the tail end
+    sorted_files = sorted(args.files, key=lambda f: os.path.getsize(f), reverse=True)
+
+    # Build task arguments
+    tasks = [
+        (x90, args.working_dir, args.config, args.optimisation_path, args.dsl, extras)
+        for x90 in sorted_files
+    ]
+
+    # Use chunksize to reduce scheduling overhead for large file lists
+    chunksize = max(1, len(tasks) // (n_workers * 4))
+
     rc = 0
-    for x90_file in args.files:
-        # Derive the stem relative to the working directory
-        stem = os.path.relpath(x90_file, args.working_dir)
-        stem = os.path.splitext(stem)[0]
-
-        # Determine which optimisation script (if any) to use
-        opt_script = None
-        if args.optimisation_path:
-            local_script = os.path.join(
-                args.optimisation_path, args.dsl, f"{stem}.py")
-            global_script = os.path.join(
-                args.optimisation_path, args.dsl, "global.py")
-            if os.path.isfile(local_script):
-                opt_script = local_script
-                label = "PSyclone - local optimisation"
-            elif os.path.isfile(global_script):
-                opt_script = global_script
-                label = "PSyclone - global optimisation"
-            else:
-                label = "PSyclone"
-        else:
-            label = "PSyclone"
-
-        psyclone_args = [
-            '-api', 'lfric',
-            '-d', args.working_dir,
-            '--config', args.config,
-            '-okern', os.path.join(args.working_dir, 'kernel'),
-            '-oalg', os.path.join(args.working_dir, f'{stem}.f90'),
-            '-opsy', os.path.join(args.working_dir, f'{stem}_psy.f90'),
-        ]
-        if opt_script:
-            psyclone_args.extend(['-s', opt_script])
-        psyclone_args.extend(extras)
-        psyclone_args.append(x90_file)
-
-        print(f"{label}: {stem}")
-        try:
-            psyclone_main(psyclone_args)
-        except SystemExit as err:
-            if err.code and err.code != 0:
-                rc = err.code
-        except Exception as err:
-            print(f"Error processing {stem}: {err}", file=sys.stderr)
-            rc = 1
+    with ProcessPoolExecutor(max_workers=n_workers, initializer=_worker_init) as pool:
+        for code, msg in pool.map(_process_one, tasks, chunksize=chunksize):
+            print(msg, flush=True)
+            if code:
+                rc = code
 
     sys.exit(rc)
 
